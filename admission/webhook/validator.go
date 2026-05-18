@@ -55,9 +55,10 @@ func (av *AdmissionValidator) Validate(ctx context.Context, attrs admission.Attr
 		for _, rule := range rules {
 			failure := rule.ProcessEvent(attrs, av)
 			if failure != nil {
-				logger.L().Info("Rule failed", helpers.Interface("failure", failure))
+				logger.L().Info("Rule matched",
+					helpers.String("ruleID", failure.GetRuleId()),
+					helpers.Interface("failure", failure))
 				av.exporter.SendAdmissionAlert(failure)
-				return admission.NewForbidden(attrs, nil)
 			}
 		}
 	}

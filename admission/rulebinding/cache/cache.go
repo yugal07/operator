@@ -13,7 +13,6 @@ import (
 	"github.com/kubescape/node-agent/pkg/watcher"
 	"github.com/kubescape/operator/admission/rulebinding"
 	"github.com/kubescape/operator/admission/rules"
-	rulesv1 "github.com/kubescape/operator/admission/rules/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -38,13 +37,20 @@ type RBCache struct {
 	ignoreRuleBindings bool
 }
 
-func NewCache(k8sClient k8sclient.K8sClientInterface, ignoreRuleBindings bool) *RBCache {
+func NewCache(k8sClient k8sclient.K8sClientInterface, ruleCreator rules.RuleCreator, ignoreRuleBindings bool) *RBCache {
 	return &RBCache{
 		k8sClient:          k8sClient,
-		ruleCreator:        rulesv1.NewRuleCreator(),
+		ruleCreator:        ruleCreator,
 		rbNameToRB:         maps.SafeMap[string, typesv1.RuntimeAlertRuleBinding]{},
 		watchResources:     resourcesToWatch(),
 		ignoreRuleBindings: ignoreRuleBindings,
+	}
+}
+
+func (c *RBCache) RefreshRules() {
+	for _, rb := range c.rbNameToRB.Values() {
+		rbName := uniqueName(&rb)
+		c.rbNameToRules.Set(rbName, c.createRules(rb.Spec.Rules))
 	}
 }
 
