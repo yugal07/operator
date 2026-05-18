@@ -1,0 +1,275 @@
+package cel
+
+import (
+	"testing"
+
+	armotypes "github.com/armosec/armoapi-go/armotypes"
+	admissioncel "github.com/kubescape/operator/admission/cel"
+	"github.com/kubescape/operator/objectcache"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/authentication/user"
+)
+
+// newEvalTestAttributes builds an admission.Attributes suitable for evaluator tests.
+func newEvalTestAttributes(kind, name, namespace, operation, subresource string, obj map[string]interface{}) admission.Attributes {
+	gvk := schema.GroupVersionKind{Group: "", Version: "v1", Kind: kind}
+	gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+	var u *unstructured.Unstructured
+	if obj != nil {
+		u = &unstructured.Unstructured{Object: obj}
+	}
+	userInfo := &user.DefaultInfo{
+		Name:   "test-user",
+		Groups: []string{"system:masters"},
+		UID:    "uid-123",
+	}
+	return admission.NewAttributesRecord(u, nil, gvk, namespace, name, gvr, subresource,
+		admission.Operation(operation), nil, false, userInfo)
+}
+
+// newExecRule returns a RuntimeRule that matches PodExecOptions admission events.
+func newExecRule() armotypes.RuntimeRule {
+	return armotypes.RuntimeRule{
+		ID:          "R3000",
+		Name:        "Exec to pod",
+		Description: "Detects exec to pod",
+		Severity:    armotypes.RuleSeverityHigh,
+		Tags:        []string{"exec"},
+		Expressions: armotypes.RuleExpressions{
+			Message:  `"Exec detected on pod: " + event.Name`,
+			UniqueID: `event.Namespace + "/" + event.Name`,
+			RuleExpression: []armotypes.RuleExpression{
+				{EventType: admissioncel.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
+			},
+		},
+	}
+}
+
+func TestIDAndName(t *testing.T) {
+	engine := newTestCelEngine(t)
+	rule := newExecRule()
+	ev := newCelRuleEvaluator(rule, engine)
+
+	if ev.ID() != "R3000" {
+		t.Errorf("ID = %q, want R3000", ev.ID())
+	}
+	if ev.Name() != "Exec to pod" {
+		t.Errorf("Name = %q, want 'Exec to pod'", ev.Name())
+	}
+}
+
+func TestParameters(t *testing.T) {
+	engine := newTestCelEngine(t)
+	ev := newCelRuleEvaluator(newExecRule(), engine)
+
+	if p := ev.GetParameters(); p != nil {
+		t.Errorf("GetParameters before Set = %v, want nil", p)
+	}
+
+	params := map[string]interface{}{"threshold": 5}
+	ev.SetParameters(params)
+
+	got := ev.GetParameters()
+	if len(got) != 1 {
+		t.Fatalf("GetParameters len = %d, want 1", len(got))
+	}
+	if got["threshold"] != 5 {
+		t.Errorf("GetParameters[threshold] = %v, want 5", got["threshold"])
+	}
+}
+
+func TestProcessEvent_NoMatch(t *testing.T) {
+	engine := newTestCelEngine(t)
+	ev := newCelRuleEvaluator(newExecRule(), engine)
+
+	// Send a Pod event, rule only fires on PodExecOptions.
+	attrs := newEvalTestAttributes("Pod", "my-pod", "default", "CREATE", "", map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+	})
+
+	result := ev.ProcessEvent(attrs, nil)
+	if result != nil {
+		t.Errorf("expected nil for non-matching event, got %v", result)
+	}
+}
+
+func TestProcessEvent_Match(t *testing.T) {
+	engine := newTestCelEngine(t)
+	ev := newCelRuleEvaluator(newExecRule(), engine)
+
+	attrs := newEvalTestAttributes("PodExecOptions", "my-pod", "default", "CONNECT", "exec",
+		map[string]interface{}{
+			"command":   []interface{}{"/bin/sh"},
+			"container": "main",
+		})
+
+	result := ev.ProcessEvent(attrs, nil)
+	if result == nil {
+		t.Fatal("expected non-nil RuleFailure for matching event")
+	}
+
+	// Rule ID
+	if result.GetRuleId() != "R3000" {
+		t.Errorf("GetRuleId = %q, want R3000", result.GetRuleId())
+	}
+
+	// BaseRuntimeAlert
+	base := result.GetBaseRuntimeAlert()
+	if base.AlertName != "Exec detected on pod: my-pod" {
+		t.Errorf("AlertName = %q, want 'Exec detected on pod: my-pod'", base.AlertName)
+	}
+	if base.Severity != armotypes.RuleSeverityHigh {
+		t.Errorf("Severity = %d, want %d", base.Severity, armotypes.RuleSeverityHigh)
+	}
+	if base.UniqueID != "default/my-pod" {
+		t.Errorf("UniqueID = %q, want 'default/my-pod'", base.UniqueID)
+	}
+	if base.Timestamp.IsZero() {
+		t.Error("Timestamp is zero, want non-zero")
+	}
+
+	// RuleAlert
+	ruleAlert := result.GetRuleAlert()
+	if ruleAlert.RuleDescription != "Detects exec to pod" {
+		t.Errorf("RuleDescription = %q, want 'Detects exec to pod'", ruleAlert.RuleDescription)
+	}
+
+	// AdmissionAlert
+	admAlert := result.GetAdmissionsAlert()
+	if admAlert.ObjectName != "my-pod" {
+		t.Errorf("AdmissionAlert.ObjectName = %q, want 'my-pod'", admAlert.ObjectName)
+	}
+	if admAlert.RequestNamespace != "default" {
+		t.Errorf("AdmissionAlert.RequestNamespace = %q, want 'default'", admAlert.RequestNamespace)
+	}
+	if admAlert.Subresource != "exec" {
+		t.Errorf("AdmissionAlert.Subresource = %q, want 'exec'", admAlert.Subresource)
+	}
+	if admAlert.Kind.Kind != "PodExecOptions" {
+		t.Errorf("AdmissionAlert.Kind.Kind = %q, want 'PodExecOptions'", admAlert.Kind.Kind)
+	}
+	if admAlert.UserInfo == nil {
+		t.Fatal("AdmissionAlert.UserInfo is nil")
+	}
+	if admAlert.UserInfo.Name != "test-user" {
+		t.Errorf("AdmissionAlert.UserInfo.Name = %q, want 'test-user'", admAlert.UserInfo.Name)
+	}
+	if admAlert.Object == nil {
+		t.Error("AdmissionAlert.Object is nil, want non-nil")
+	}
+}
+
+func TestProcessEvent_NilAttrs(t *testing.T) {
+	engine := newTestCelEngine(t)
+	ev := newCelRuleEvaluator(newExecRule(), engine)
+
+	result := ev.ProcessEvent(nil, nil)
+	if result != nil {
+		t.Errorf("expected nil for nil attrs, got %v", result)
+	}
+}
+
+func TestProcessEvent_MessageFallback(t *testing.T) {
+	engine := newTestCelEngine(t)
+
+	// Rule with no Message expression — AlertName should fall back to rule name.
+	rule := armotypes.RuntimeRule{
+		ID:       "R4000",
+		Name:     "Fallback Rule",
+		Severity: armotypes.RuleSeverityLow,
+		Expressions: armotypes.RuleExpressions{
+			// No Message field.
+			RuleExpression: []armotypes.RuleExpression{
+				{EventType: admissioncel.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
+			},
+		},
+	}
+
+	ev := newCelRuleEvaluator(rule, engine)
+	attrs := newEvalTestAttributes("PodExecOptions", "my-pod", "default", "CONNECT", "exec",
+		map[string]interface{}{
+			"kind":       "PodExecOptions",
+			"apiVersion": "v1",
+		})
+
+	result := ev.ProcessEvent(attrs, nil)
+	if result == nil {
+		t.Fatal("expected non-nil RuleFailure")
+	}
+	if result.GetBaseRuntimeAlert().AlertName != "Fallback Rule" {
+		t.Errorf("AlertName = %q, want 'Fallback Rule'", result.GetBaseRuntimeAlert().AlertName)
+	}
+}
+
+func TestProcessEvent_WithK8sEnrichment(t *testing.T) {
+	engine := newTestCelEngine(t)
+	ev := newCelRuleEvaluator(newExecRule(), engine)
+
+	attrs := newEvalTestAttributes("PodExecOptions", "test-pod", "test-namespace", "CONNECT", "exec",
+		map[string]interface{}{
+			"kind":       "PodExecOptions",
+			"apiVersion": "v1",
+			"command":    []interface{}{"bash"},
+			"container":  "test-container",
+		})
+
+	// KubernetesCacheMockImpl pre-populates a pod named "test-pod" in "test-namespace".
+	result := ev.ProcessEvent(attrs, objectcache.KubernetesCacheMockImpl{})
+	if result == nil {
+		t.Fatal("expected non-nil RuleFailure")
+	}
+
+	k8s := result.GetRuntimeAlertK8sDetails()
+	if k8s.PodName != "test-pod" {
+		t.Errorf("PodName = %q, want 'test-pod'", k8s.PodName)
+	}
+	if k8s.Namespace != "test-namespace" {
+		t.Errorf("Namespace = %q, want 'test-namespace'", k8s.Namespace)
+	}
+	if k8s.NodeName != "test-node" {
+		t.Errorf("NodeName = %q, want 'test-node'", k8s.NodeName)
+	}
+	if k8s.WorkloadName != "test-workload" {
+		t.Errorf("WorkloadName = %q, want 'test-workload'", k8s.WorkloadName)
+	}
+	if k8s.WorkloadKind != "ReplicaSet" {
+		t.Errorf("WorkloadKind = %q, want 'ReplicaSet'", k8s.WorkloadKind)
+	}
+	if k8s.ContainerName != "test-container" {
+		t.Errorf("ContainerName = %q, want 'test-container'", k8s.ContainerName)
+	}
+	if k8s.ContainerID != "containerd://abcdef1234567890" {
+		t.Errorf("ContainerID = %q, want 'containerd://abcdef1234567890'", k8s.ContainerID)
+	}
+}
+
+func TestProcessEvent_WrongEventType(t *testing.T) {
+	engine := newTestCelEngine(t)
+
+	// Rule with an exec event type expression (not k8s-admission).
+	rule := armotypes.RuntimeRule{
+		ID:   "R5000",
+		Name: "Wrong event type",
+		Expressions: armotypes.RuleExpressions{
+			RuleExpression: []armotypes.RuleExpression{
+				{EventType: armotypes.EventTypeExec, Expression: `event.Kind == "PodExecOptions"`},
+			},
+		},
+	}
+
+	ev := newCelRuleEvaluator(rule, engine)
+	attrs := newEvalTestAttributes("PodExecOptions", "my-pod", "default", "CONNECT", "exec",
+		map[string]interface{}{
+			"kind":       "PodExecOptions",
+			"apiVersion": "v1",
+		})
+
+	// No k8s-admission expressions → should not match.
+	result := ev.ProcessEvent(attrs, nil)
+	if result != nil {
+		t.Errorf("expected nil when no k8s-admission expressions exist, got %v", result)
+	}
+}

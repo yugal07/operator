@@ -1,0 +1,108 @@
+package cel
+
+import (
+	"sync"
+
+	armotypes "github.com/armosec/armoapi-go/armotypes"
+	admissioncel "github.com/kubescape/operator/admission/cel"
+)
+
+// CelRuleCreator implements rules.RuleCreator backed by a []armotypes.RuntimeRule
+// that can be replaced atomically via SyncRules.
+type CelRuleCreator struct {
+	mu        sync.RWMutex
+	rules     []armotypes.RuntimeRule
+	celEngine *admissioncel.AdmissionCEL
+}
+
+// NewCelRuleCreator returns a new CelRuleCreator with no rules loaded yet.
+func NewCelRuleCreator(celEngine *admissioncel.AdmissionCEL) *CelRuleCreator {
+	return &CelRuleCreator{
+		celEngine: celEngine,
+	}
+}
+
+// SyncRules replaces the internal rule set with a copy of the provided slice.
+// It is safe to call concurrently.
+func (c *CelRuleCreator) SyncRules(rules []armotypes.RuntimeRule) {
+	copied := make([]armotypes.RuntimeRule, len(rules))
+	copy(copied, rules)
+
+	c.mu.Lock()
+	c.rules = copied
+	c.mu.Unlock()
+}
+
+// CreateRuleByID returns a RuleEvaluator for the rule with the given ID, or nil
+// if no matching rule exists.
+func (c *CelRuleCreator) CreateRuleByID(id string) *CelRuleEvaluator {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for _, r := range c.rules {
+		if r.ID == id {
+			return newCelRuleEvaluator(r, c.celEngine)
+		}
+	}
+	return nil
+}
+
+// CreateRuleByName returns a RuleEvaluator for the first rule whose Name matches,
+// or nil if no matching rule exists.
+func (c *CelRuleCreator) CreateRuleByName(name string) *CelRuleEvaluator {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for _, r := range c.rules {
+		if r.Name == name {
+			return newCelRuleEvaluator(r, c.celEngine)
+		}
+	}
+	return nil
+}
+
+// CreateRulesByTags returns evaluators for all rules that have at least one tag
+// in common with the requested tags set.
+func (c *CelRuleCreator) CreateRulesByTags(tags []string) []*CelRuleEvaluator {
+	if len(tags) == 0 {
+		return nil
+	}
+
+	tagSet := make(map[string]struct{}, len(tags))
+	for _, t := range tags {
+		tagSet[t] = struct{}{}
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var result []*CelRuleEvaluator
+	for _, r := range c.rules {
+		if ruleMatchesTags(r, tagSet) {
+			result = append(result, newCelRuleEvaluator(r, c.celEngine))
+		}
+	}
+	return result
+}
+
+// CreateAllRules returns evaluators for every loaded rule.
+func (c *CelRuleCreator) CreateAllRules() []*CelRuleEvaluator {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	result := make([]*CelRuleEvaluator, len(c.rules))
+	for i, r := range c.rules {
+		result[i] = newCelRuleEvaluator(r, c.celEngine)
+	}
+	return result
+}
+
+// ruleMatchesTags reports whether any of the rule's tags appear in tagSet.
+func ruleMatchesTags(r armotypes.RuntimeRule, tagSet map[string]struct{}) bool {
+	for _, t := range r.Tags {
+		if _, ok := tagSet[t]; ok {
+			return true
+		}
+	}
+	return false
+}
