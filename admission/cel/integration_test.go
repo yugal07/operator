@@ -64,7 +64,7 @@ func TestIntegration_ExecToPod_CELRule(t *testing.T) {
 			Message:  `"Exec to pod: " + event.Name + " by " + event.UserInfo.Username`,
 			UniqueID: `event.Namespace + "/" + event.Name`,
 			RuleExpression: []armotypes.RuleExpression{
-				{EventType: admissioncel.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
+				{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
 			},
 		},
 	}
@@ -124,7 +124,7 @@ func TestIntegration_PortForward_CELRule(t *testing.T) {
 			Message:  `"Port forward to pod: " + event.Name`,
 			UniqueID: `event.Namespace + "/" + event.Name`,
 			RuleExpression: []armotypes.RuleExpression{
-				{EventType: admissioncel.EventTypeK8sAdmission, Expression: `event.Kind == "PodPortForwardOptions"`},
+				{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "PodPortForwardOptions"`},
 			},
 		},
 	}
@@ -175,7 +175,7 @@ func TestIntegration_NoMatch_DifferentKind(t *testing.T) {
 		Severity: armotypes.RuleSeverityLow,
 		Expressions: armotypes.RuleExpressions{
 			RuleExpression: []armotypes.RuleExpression{
-				{EventType: admissioncel.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
+				{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
 			},
 		},
 	}
@@ -216,7 +216,7 @@ func TestIntegration_GenericAdmissionRule(t *testing.T) {
 			UniqueID: `event.Namespace + "/" + event.Name`,
 			RuleExpression: []armotypes.RuleExpression{
 				{
-					EventType:  admissioncel.EventTypeK8sAdmission,
+					EventType:  armotypes.EventTypeK8sAdmission,
 					Expression: `event.Operation == "CREATE" && event.Kind == "Pod"`,
 				},
 			},

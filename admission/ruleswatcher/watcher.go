@@ -10,7 +10,6 @@ import (
 	"github.com/kubescape/node-agent/pkg/k8sclient"
 	typesv1 "github.com/kubescape/node-agent/pkg/rulemanager/types/v1"
 	"github.com/kubescape/node-agent/pkg/watcher"
-	admissioncel "github.com/kubescape/operator/admission/cel"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -151,7 +150,7 @@ func filterAdmissionRules(rules []armotypes.RuntimeRule) []armotypes.RuntimeRule
 // expression with EventType == k8s-admission.
 func hasAdmissionExpression(r armotypes.RuntimeRule) bool {
 	for _, expr := range r.Expressions.RuleExpression {
-		if expr.EventType == admissioncel.EventTypeK8sAdmission {
+		if expr.EventType == armotypes.EventTypeK8sAdmission {
 			return true
 		}
 	}

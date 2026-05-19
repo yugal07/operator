@@ -29,7 +29,7 @@ var testRules = []armotypes.RuntimeRule{
 			Message:  `"Exec detected on pod: " + event.Name`,
 			UniqueID: `event.Namespace + "/" + event.Name`,
 			RuleExpression: []armotypes.RuleExpression{
-				{EventType: admissioncel.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
+				{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
 			},
 		},
 	},
@@ -41,7 +41,7 @@ var testRules = []armotypes.RuntimeRule{
 		Severity:    armotypes.RuleSeverityMed,
 		Expressions: armotypes.RuleExpressions{
 			RuleExpression: []armotypes.RuleExpression{
-				{EventType: admissioncel.EventTypeK8sAdmission, Expression: `event.Kind == "PodPortForwardOptions"`},
+				{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "PodPortForwardOptions"`},
 			},
 		},
 	},
@@ -53,7 +53,7 @@ var testRules = []armotypes.RuntimeRule{
 		Severity:    armotypes.RuleSeverityCritical,
 		Expressions: armotypes.RuleExpressions{
 			RuleExpression: []armotypes.RuleExpression{
-				{EventType: admissioncel.EventTypeK8sAdmission, Expression: `event.Kind == "Pod"`},
+				{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "Pod"`},
 			},
 		},
 	},

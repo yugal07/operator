@@ -24,8 +24,8 @@ func TestMatchSimpleKind(t *testing.T) {
 	event := newExecEvent()
 	ctx := engine.CreateEvalContext(event)
 
-	ok, err := engine.EvaluateRuleWithContext(ctx, EventTypeK8sAdmission, []armotypes.RuleExpression{
-		{EventType: EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
+	ok, err := engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
 	})
 	if err != nil {
 		t.Fatalf("EvaluateRuleWithContext: %v", err)
@@ -44,8 +44,8 @@ func TestNoMatch_DifferentKind(t *testing.T) {
 	event := newExecEvent()
 	ctx := engine.CreateEvalContext(event)
 
-	ok, err := engine.EvaluateRuleWithContext(ctx, EventTypeK8sAdmission, []armotypes.RuleExpression{
-		{EventType: EventTypeK8sAdmission, Expression: `event.Kind == "Pod"`},
+	ok, err := engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "Pod"`},
 	})
 	if err != nil {
 		t.Fatalf("EvaluateRuleWithContext: %v", err)
@@ -66,7 +66,7 @@ func TestSkipDifferentEventType(t *testing.T) {
 
 	// Expression is for "exec" event type, but we evaluate with "k8s-admission".
 	// No expressions match, so the result should be false.
-	ok, err := engine.EvaluateRuleWithContext(ctx, EventTypeK8sAdmission, []armotypes.RuleExpression{
+	ok, err := engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
 		{EventType: armotypes.EventTypeExec, Expression: `event.Kind == "PodExecOptions"`},
 	})
 	if err != nil {
@@ -86,9 +86,9 @@ func TestMultipleExpressions_AllTrue(t *testing.T) {
 	event := newExecEvent()
 	ctx := engine.CreateEvalContext(event)
 
-	ok, err := engine.EvaluateRuleWithContext(ctx, EventTypeK8sAdmission, []armotypes.RuleExpression{
-		{EventType: EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
-		{EventType: EventTypeK8sAdmission, Expression: `event.Namespace == "default"`},
+	ok, err := engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Namespace == "default"`},
 	})
 	if err != nil {
 		t.Fatalf("EvaluateRuleWithContext: %v", err)
@@ -108,9 +108,9 @@ func TestMultipleExpressions_ShortCircuit(t *testing.T) {
 	ctx := engine.CreateEvalContext(event)
 
 	// First expression is false — should short-circuit without evaluating the second.
-	ok, err := engine.EvaluateRuleWithContext(ctx, EventTypeK8sAdmission, []armotypes.RuleExpression{
-		{EventType: EventTypeK8sAdmission, Expression: `event.Kind == "Pod"`},
-		{EventType: EventTypeK8sAdmission, Expression: `event.Namespace == "default"`},
+	ok, err := engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "Pod"`},
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Namespace == "default"`},
 	})
 	if err != nil {
 		t.Fatalf("EvaluateRuleWithContext: %v", err)
@@ -129,8 +129,8 @@ func TestUserInfoAccess(t *testing.T) {
 	event := newExecEvent()
 	ctx := engine.CreateEvalContext(event)
 
-	ok, err := engine.EvaluateRuleWithContext(ctx, EventTypeK8sAdmission, []armotypes.RuleExpression{
-		{EventType: EventTypeK8sAdmission, Expression: `event.UserInfo.Username == "test-user"`},
+	ok, err := engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.UserInfo.Username == "test-user"`},
 	})
 	if err != nil {
 		t.Fatalf("EvaluateRuleWithContext: %v", err)
@@ -151,8 +151,8 @@ func TestObjectFieldAccess(t *testing.T) {
 
 	// Object/OldObject/Options are top-level map variables, not struct fields,
 	// because cel-go NativeTypes doesn't support map[string]interface{}.
-	ok, err := engine.EvaluateRuleWithContext(ctx, EventTypeK8sAdmission, []armotypes.RuleExpression{
-		{EventType: EventTypeK8sAdmission, Expression: `object["container"] == "main"`},
+	ok, err := engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: `object["container"] == "main"`},
 	})
 	if err != nil {
 		t.Fatalf("EvaluateRuleWithContext: %v", err)
@@ -190,8 +190,8 @@ func TestCompileError(t *testing.T) {
 	event := newExecEvent()
 	ctx := engine.CreateEvalContext(event)
 
-	_, err = engine.EvaluateRuleWithContext(ctx, EventTypeK8sAdmission, []armotypes.RuleExpression{
-		{EventType: EventTypeK8sAdmission, Expression: `event.nonExistentField == "x"`},
+	_, err = engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.nonExistentField == "x"`},
 	})
 	if err == nil {
 		t.Fatal("expected error for non-existent field, got nil")
@@ -211,8 +211,8 @@ func TestProgramCaching(t *testing.T) {
 
 	// Evaluate twice — cache should hold exactly one entry for this expression.
 	for i := 0; i < 2; i++ {
-		_, err := engine.EvaluateRuleWithContext(ctx, EventTypeK8sAdmission, []armotypes.RuleExpression{
-			{EventType: EventTypeK8sAdmission, Expression: expr},
+		_, err := engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
+			{EventType: armotypes.EventTypeK8sAdmission, Expression: expr},
 		})
 		if err != nil {
 			t.Fatalf("iteration %d: %v", i, err)

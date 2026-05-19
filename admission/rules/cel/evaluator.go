@@ -69,7 +69,7 @@ func (e *CelRuleEvaluator) ProcessEvent(attrs admission.Attributes, access objec
 	// Evaluate the rule's match expressions for the k8s-admission event type.
 	matched, err := e.celEngine.EvaluateRuleWithContext(
 		evalCtx,
-		admissioncel.EventTypeK8sAdmission,
+		apitypes.EventTypeK8sAdmission,
 		e.rule.Expressions.RuleExpression,
 	)
 	if err != nil {

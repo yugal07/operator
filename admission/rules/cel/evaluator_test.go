@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	armotypes "github.com/armosec/armoapi-go/armotypes"
-	admissioncel "github.com/kubescape/operator/admission/cel"
 	"github.com/kubescape/operator/objectcache"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -41,7 +40,7 @@ func newExecRule() armotypes.RuntimeRule {
 			Message:  `"Exec detected on pod: " + event.Name`,
 			UniqueID: `event.Namespace + "/" + event.Name`,
 			RuleExpression: []armotypes.RuleExpression{
-				{EventType: admissioncel.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
+				{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
 			},
 		},
 	}
@@ -183,7 +182,7 @@ func TestProcessEvent_MessageFallback(t *testing.T) {
 		Expressions: armotypes.RuleExpressions{
 			// No Message field.
 			RuleExpression: []armotypes.RuleExpression{
-				{EventType: admissioncel.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
+				{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
 			},
 		},
 	}

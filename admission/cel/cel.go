@@ -11,11 +11,6 @@ import (
 	"github.com/google/cel-go/ext"
 )
 
-// EventTypeK8sAdmission is the event type for Kubernetes admission webhook
-// events. Defined locally because the pinned armoapi-go version does not yet
-// export this constant.
-const EventTypeK8sAdmission armotypes.EventType = "k8s-admission"
-
 // AdmissionCEL owns a CEL environment configured for evaluating expressions
 // against AdmissionCelEvent values. Compiled programs are cached so repeated
 // evaluation of the same expression avoids re-compilation.
@@ -63,7 +58,7 @@ func NewAdmissionCEL() (*AdmissionCEL, error) {
 func (c *AdmissionCEL) CreateEvalContext(event *AdmissionCelEvent) map[string]any {
 	ctx := map[string]any{
 		"event":     event,
-		"eventType": string(EventTypeK8sAdmission),
+		"eventType": string(armotypes.EventTypeK8sAdmission),
 	}
 	if event.Object != nil {
 		ctx["object"] = event.Object
