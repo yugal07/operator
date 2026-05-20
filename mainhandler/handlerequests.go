@@ -515,10 +515,15 @@ func (mainHandler *MainHandler) EventWorkerPool() *ants.PoolWithFunc {
 }
 
 func (mainHandler *MainHandler) SendReports(ctx context.Context, period time.Duration) {
+	// Clear the package-level BuildNumber so CheckLatestVersion does not emit a
+	// version-mismatch warning — the operator version is not comparable to the
+	// kubescape release track. The real build number is still sent in the request body.
+	buildNumber := versioncheck.BuildNumber
+	versioncheck.BuildNumber = ""
 	for {
 		v := versioncheck.NewVersionCheckHandler()
 		versionCheckRequest := versioncheck.NewVersionCheckRequest(
-			mainHandler.config.AccountID(), versioncheck.BuildNumber, "", "",
+			mainHandler.config.AccountID(), buildNumber, "", "",
 			"daily-report", mainHandler.k8sAPI.KubernetesClient)
 		err := v.CheckLatestVersion(ctx, versionCheckRequest)
 		if err != nil {
