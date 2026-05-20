@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/armosec/armoapi-go/armotypes"
 	"github.com/armosec/utils-k8s-go/probes"
@@ -226,9 +225,6 @@ func main() {
 			logger.L().Error(http.ListenAndServe(":6060", nil).Error())
 		}()
 	}
-
-	// send reports every 24 hours
-	go mainHandler.SendReports(ctx, 24*time.Hour)
 
 	// Wait for shutdown signal
 	shutdown := make(chan os.Signal, 1)
