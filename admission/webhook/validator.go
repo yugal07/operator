@@ -3,6 +3,8 @@ package webhook
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/kubescape/go-logger"
 	"github.com/kubescape/go-logger/helpers"
@@ -16,6 +18,27 @@ import (
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/client-go/kubernetes"
 )
+
+const (
+	// defaultWorkerPoolSize is the number of goroutines draining the
+	// admission evaluation queue. The pool is bounded; under burst load
+	// excess events are dropped, never queued unboundedly.
+	defaultWorkerPoolSize = 10
+	// defaultQueueSize bounds the in-flight evaluation backlog. Values that
+	// can't be enqueued because the queue is full are dropped with a warning.
+	defaultQueueSize = 1000
+	// dropLogInterval throttles drop warnings to every N drops so a burst
+	// can't flood the operator log.
+	dropLogInterval = 100
+)
+
+// evalJob is the unit of work handed off to the validator's worker pool.
+// Holding admission.Attributes directly is safe: the framework does not
+// pool or recycle these records, so workers can read the same fields the
+// validator handler saw.
+type evalJob struct {
+	attrs admission.Attributes
+}
 
 // KindAcceptor decides whether an admission Kind should be evaluated by the
 // rule pipeline. Implementations should return true for any Kind that at least
@@ -42,6 +65,14 @@ type AdmissionValidator struct {
 	// kindAcceptor pre-filters admission events by Kind before they enter
 	// the evaluation pipeline. nil means accept all Kinds.
 	kindAcceptor KindAcceptor
+
+	// Async evaluation pipeline. Validate() snapshots requests onto jobs
+	// and returns nil immediately; worker goroutines drain the channel.
+	jobs        chan evalJob
+	workerCount int
+	dropCount   atomic.Int64
+	started     atomic.Bool
+	wg          sync.WaitGroup
 }
 
 func NewAdmissionValidator(kubernetesClient *k8sinterface.KubernetesApi, objectCache objectcache.ObjectCache, exporter exporters.Exporter, ruleBindingCache rulebinding.RuleBindingCache) *AdmissionValidator {
@@ -50,6 +81,8 @@ func NewAdmissionValidator(kubernetesClient *k8sinterface.KubernetesApi, objectC
 		objectCache:      objectCache,
 		exporter:         exporter,
 		ruleBindingCache: ruleBindingCache,
+		jobs:             make(chan evalJob, defaultQueueSize),
+		workerCount:      defaultWorkerPoolSize,
 	}
 
 	subject, err := readSelfSubject(defaultServiceAccountTokenPath)
@@ -77,6 +110,48 @@ func (av *AdmissionValidator) SetKindAcceptor(a KindAcceptor) {
 	av.kindAcceptor = a
 }
 
+// SetWorkerPool reconfigures the async evaluation pipeline. Must be called
+// before Start. Exposed for tests; in production, defaults are used.
+func (av *AdmissionValidator) SetWorkerPool(workers, queueSize int) {
+	if av.started.Load() {
+		return
+	}
+	if workers > 0 {
+		av.workerCount = workers
+	}
+	if queueSize > 0 {
+		av.jobs = make(chan evalJob, queueSize)
+	}
+}
+
+// Start spawns the worker pool that drains the evaluation queue. Idempotent
+// — subsequent calls are no-ops. Workers exit when ctx is canceled.
+func (av *AdmissionValidator) Start(ctx context.Context) {
+	if !av.started.CompareAndSwap(false, true) {
+		return
+	}
+	logger.L().Info("admission validator workers starting",
+		helpers.Int("workers", av.workerCount),
+		helpers.Int("queueSize", cap(av.jobs)))
+	for i := 0; i < av.workerCount; i++ {
+		av.wg.Add(1)
+		go av.runWorker(ctx)
+	}
+}
+
+// Wait blocks until all worker goroutines have exited. Exposed for tests and
+// graceful shutdown.
+func (av *AdmissionValidator) Wait() {
+	av.wg.Wait()
+}
+
+// DropCount returns the cumulative number of admission events the validator
+// has dropped because the evaluation queue was full. Suitable for export as
+// a Prometheus counter.
+func (av *AdmissionValidator) DropCount() int64 {
+	return av.dropCount.Load()
+}
+
 func (av *AdmissionValidator) GetClientset() kubernetes.Interface {
 	return av.objectCache.GetKubernetesCache().GetClientset()
 }
@@ -94,47 +169,93 @@ func (av *AdmissionValidator) isSelfRequest(attrs admission.Attributes) bool {
 	return ui.GetName() == av.selfSubject
 }
 
-// We are implementing the Validate method from the ValidationInterface interface.
-func (av *AdmissionValidator) Validate(ctx context.Context, attrs admission.Attributes, o admission.ObjectInterfaces) (err error) {
-	// Drop requests from the operator's own ServiceAccount before any
-	// processing. This is a hard guarantee against positive feedback loops,
-	// not an optimization.
+// Validate implements admission.ValidationInterface. The API server is
+// synchronous from the framework's perspective, but our rule evaluation is
+// not: matching requests are enqueued onto a bounded worker pool and the
+// validator returns nil immediately. The API server never waits on CEL.
+//
+// Requests dropped here include:
+//   - Requests from the operator's own ServiceAccount (feedback-loop guard).
+//   - Requests whose Kind no loaded rule could match (Kind pre-filter).
+//   - Requests that cannot be enqueued because the queue is full (drop with
+//     warning + counter, never block the API server).
+func (av *AdmissionValidator) Validate(_ context.Context, attrs admission.Attributes, _ admission.ObjectInterfaces) error {
 	if av.isSelfRequest(attrs) {
 		return nil
 	}
-
-	// Pre-filter on Kind: if no loaded rule could match this event, skip
-	// the entire evaluation pipeline. The acceptor falls back to wildcard
-	// when the static set cannot be determined.
 	if av.kindAcceptor != nil && !av.kindAcceptor.Accepts(attrs.GetKind().Kind) {
 		return nil
 	}
+	if attrs.GetObject() == nil {
+		return nil
+	}
 
-	if attrs.GetObject() != nil {
-		var object *unstructured.Unstructured
-		// Fetch the resource if it is a pod and the object is not a pod.
-		if attrs.GetResource().Resource == "pods" && attrs.GetKind().Kind != "Pod" {
-			object, err = av.fetchResource(ctx, attrs)
-			if err != nil {
-				return admission.NewForbidden(attrs, fmt.Errorf("failed to fetch resource: %w", err))
-			}
-		} else {
-			object = attrs.GetObject().(*unstructured.Unstructured)
-		}
-
-		rules := av.ruleBindingCache.ListRulesForObject(ctx, object)
-		for _, rule := range rules {
-			failure := rule.ProcessEvent(attrs, av)
-			if failure != nil {
-				logger.L().Info("Rule matched",
-					helpers.String("ruleID", failure.GetRuleId()),
-					helpers.Interface("failure", failure))
-				av.exporter.SendAdmissionAlert(failure)
-			}
+	select {
+	case av.jobs <- evalJob{attrs: attrs}:
+	default:
+		n := av.dropCount.Add(1)
+		if n == 1 || n%dropLogInterval == 0 {
+			logger.L().Warning("admission queue full, dropping event",
+				helpers.String("kind", attrs.GetKind().Kind),
+				helpers.String("namespace", attrs.GetNamespace()),
+				helpers.String("name", attrs.GetName()),
+				helpers.Int("totalDropped", int(n)))
 		}
 	}
 
 	return nil
+}
+
+// runWorker drains the evaluation queue until ctx is canceled.
+func (av *AdmissionValidator) runWorker(ctx context.Context) {
+	defer av.wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-av.jobs:
+			av.evaluate(ctx, job.attrs)
+		}
+	}
+}
+
+// evaluate runs the full match + alert pipeline for a single admission event.
+// Errors are logged and swallowed — alert export is best-effort.
+func (av *AdmissionValidator) evaluate(ctx context.Context, attrs admission.Attributes) {
+	var (
+		object *unstructured.Unstructured
+		err    error
+	)
+	if attrs.GetResource().Resource == "pods" && attrs.GetKind().Kind != "Pod" {
+		object, err = av.fetchResource(ctx, attrs)
+		if err != nil {
+			logger.L().Warning("admission worker: failed to fetch resource",
+				helpers.String("kind", attrs.GetKind().Kind),
+				helpers.String("name", attrs.GetName()),
+				helpers.Error(err))
+			return
+		}
+	} else {
+		un, ok := attrs.GetObject().(*unstructured.Unstructured)
+		if !ok {
+			logger.L().Warning("admission worker: object is not unstructured",
+				helpers.String("kind", attrs.GetKind().Kind))
+			return
+		}
+		object = un
+	}
+
+	matchedRules := av.ruleBindingCache.ListRulesForObject(ctx, object)
+	for _, rule := range matchedRules {
+		failure := rule.ProcessEvent(attrs, av)
+		if failure == nil {
+			continue
+		}
+		logger.L().Info("Rule matched",
+			helpers.String("ruleID", failure.GetRuleId()),
+			helpers.Interface("failure", failure))
+		av.exporter.SendAdmissionAlert(failure)
+	}
 }
 
 // Fetch resource/objects from the Kubernetes API based on the given attributes.

@@ -221,6 +221,8 @@ func main() {
 
 		admissionValidator := webhook.NewAdmissionValidator(k8sApi, objectCache, exporter, ruleBindingCache)
 		admissionValidator.SetKindAcceptor(celRuleCreator)
+		admissionValidator.Start(serverContext)
+
 		admissionController := webhook.New(addr, "/etc/certs/tls.crt", "/etc/certs/tls.key", runtime.NewScheme(), admissionValidator, ruleBindingCache)
 		go func() {
 			defer func() {
