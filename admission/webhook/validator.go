@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/kubescape/go-logger"
 	"github.com/kubescape/go-logger/helpers"
@@ -30,6 +31,11 @@ const (
 	// dropLogInterval throttles drop warnings to every N drops so a burst
 	// can't flood the operator log.
 	dropLogInterval = 100
+	// shutdownDrainTimeout bounds how long each worker spends draining queued
+	// jobs after its context is canceled. Long enough to flush a full queue
+	// against a healthy backend; short enough that pod termination is not
+	// noticeably delayed.
+	shutdownDrainTimeout = 10 * time.Second
 )
 
 // evalJob is the unit of work handed off to the validator's worker pool.
@@ -206,15 +212,43 @@ func (av *AdmissionValidator) Validate(_ context.Context, attrs admission.Attrib
 	return nil
 }
 
-// runWorker drains the evaluation queue until ctx is canceled.
+// runWorker drains the evaluation queue. While ctx is live the worker blocks
+// on av.jobs. Once ctx is canceled the worker switches to a non-blocking
+// drain pass so jobs enqueued just before cancellation are still processed,
+// then exits. Drain uses a fresh context with a bounded timeout — the worker
+// ctx is already canceled and would short-circuit downstream API calls.
 func (av *AdmissionValidator) runWorker(ctx context.Context) {
 	defer av.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
+			av.drainJobs()
 			return
 		case job := <-av.jobs:
 			av.evaluate(ctx, job.attrs)
+		}
+	}
+}
+
+// drainJobs processes every job currently in the queue, then returns. Multiple
+// workers may call this concurrently; the channel reads are safe and they
+// race to empty the queue cooperatively.
+func (av *AdmissionValidator) drainJobs() {
+	drainCtx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
+	defer cancel()
+	for {
+		select {
+		case <-drainCtx.Done():
+			remaining := len(av.jobs)
+			if remaining > 0 {
+				logger.L().Warning("admission validator drain timed out; abandoning queued jobs",
+					helpers.Int("remaining", remaining))
+			}
+			return
+		case job := <-av.jobs:
+			av.evaluate(drainCtx, job.attrs)
+		default:
+			return
 		}
 	}
 }

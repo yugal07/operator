@@ -236,9 +236,11 @@ func TestValidator_WorkerPool_ProcessesEnqueuedJobs(t *testing.T) {
 type blockingRuleBindingCache struct {
 	release chan struct{}
 	entered chan struct{}
+	count   atomic.Int64
 }
 
 func (c *blockingRuleBindingCache) ListRulesForObject(_ context.Context, _ *unstructured.Unstructured) []rules.RuleEvaluator {
+	c.count.Add(1)
 	select {
 	case c.entered <- struct{}{}:
 	default:
@@ -296,6 +298,74 @@ func TestValidator_WorkerPool_DropsWhenQueueFull(t *testing.T) {
 
 	if got := av.DropCount(); got != expectedDrops {
 		t.Errorf("DropCount = %d, want %d", got, expectedDrops)
+	}
+}
+
+// TestValidator_WorkerPool_DrainsQueuedJobsOnShutdown verifies that jobs
+// enqueued before context cancellation are processed by the drain path on
+// worker exit rather than abandoned.
+func TestValidator_WorkerPool_DrainsQueuedJobsOnShutdown(t *testing.T) {
+	cache := &blockingRuleBindingCache{
+		release: make(chan struct{}),
+		entered: make(chan struct{}, 1),
+	}
+
+	const workers = 1
+	const queueSize = 4
+
+	av := newTestValidator(cache)
+	av.SetWorkerPool(workers, queueSize)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	av.Start(ctx)
+
+	// Step 1: submit one job and wait until the worker has actually entered
+	// the blocked cache call. After this barrier the channel is empty and
+	// the worker is parked.
+	if err := av.Validate(ctx, newSelfTestAttributes("kubernetes-admin"), nil); err != nil {
+		t.Fatalf("Validate returned error on first submission: %v", err)
+	}
+	select {
+	case <-cache.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker never entered the blocking cache call")
+	}
+
+	// Step 2: fill the queue with queueSize additional jobs — these must
+	// survive the cancel-and-drain handoff.
+	for i := 0; i < queueSize; i++ {
+		if err := av.Validate(ctx, newSelfTestAttributes("kubernetes-admin"), nil); err != nil {
+			t.Fatalf("Validate returned error on queue-fill submission %d: %v", i, err)
+		}
+	}
+	if got := av.DropCount(); got != 0 {
+		t.Fatalf("DropCount = %d after queue fill, want 0", got)
+	}
+	const total = 1 + queueSize
+
+	// Cancel mid-flight. The worker, currently parked in the cache, won't
+	// see the cancel until ListRulesForObject returns. Release the cache so
+	// the worker continues; it must then enter the drain path and process
+	// every queued job before exiting.
+	cancel()
+	close(cache.release)
+
+	done := make(chan struct{})
+	go func() {
+		av.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("workers did not exit after cancel + drain")
+	}
+
+	if got := cache.count.Load(); got != int64(total) {
+		t.Errorf("evaluated %d jobs, want %d (queued jobs were not drained)", got, total)
+	}
+	if got := av.DropCount(); got != 0 {
+		t.Errorf("DropCount = %d during drain test, want 0", got)
 	}
 }
 
