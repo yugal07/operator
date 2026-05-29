@@ -177,7 +177,8 @@ func getImageFromSpec(instanceID instanceidhandler.IInstanceID, containers []cor
 }
 
 // GetClusterUID retrieves the UID of the kube-system namespace to use as a stable cluster identifier.
-// If the namespace cannot be accessed (e.g., due to RBAC restrictions), it returns an empty string and logs a warning.
+// If the namespace cannot be accessed (e.g., due to RBAC restrictions), it checks the CLUSTER_UID
+// environment variable. If that is also unset, it returns an empty string and logs a warning.
 func GetClusterUID(k8sClient kubernetes.Interface) string {
 	if envUID := os.Getenv("CLUSTER_UID"); envUID != "" {
 		logger.L().Info("retrieved ClusterUID from environment variable CLUSTER_UID", helpers.String("clusterUID", envUID))

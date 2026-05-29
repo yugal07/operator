@@ -290,6 +290,7 @@ The Operator reads configuration from `/etc/config/`. When running locally, set 
 | `OTEL_COLLECTOR_SVC` | OpenTelemetry collector address (e.g., `otel-collector:4317`) | *not set* |
 | `RELEASE` | Image version for logging | *set at build time* |
 | `NODE_NAME` | Kubernetes node name (from downward API) | *set by Kubernetes* |
+| `CLUSTER_UID` | Fallback stable cluster identifier if `kube-system` namespace is inaccessible due to restricted RBAC permissions | *not set (discovered from kube-system UID)* |
 
 ### Configuration Defaults
 
