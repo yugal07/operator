@@ -66,6 +66,15 @@ func (e *CelRuleEvaluator) ProcessEvent(attrs admission.Attributes, access objec
 	celEvent := admissioncel.NewAdmissionCelEvent(attrs)
 	evalCtx := e.celEngine.CreateEvalContext(celEvent)
 
+	// Inject the active binding's parameter overrides under the "params"
+	// key so CEL expressions can reference params["threshold"], etc.
+	// CreateEvalContext seeded "params" to an empty map; replace it only
+	// when this evaluator has binding parameters so expressions referencing
+	// it remain evaluable in either case.
+	if e.parameters != nil {
+		evalCtx["params"] = e.parameters
+	}
+
 	// Evaluate the rule's match expressions for the k8s-admission event type.
 	matched, err := e.celEngine.EvaluateRuleWithContext(
 		evalCtx,

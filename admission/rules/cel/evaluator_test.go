@@ -245,6 +245,63 @@ func TestProcessEvent_WithK8sEnrichment(t *testing.T) {
 	}
 }
 
+// TestProcessEvent_UsesBindingParameters verifies that SetParameters values
+// are reachable from CEL expressions via the "params" variable. Without this,
+// per-binding overrides would be inert: parametrized rules would never see
+// the parameter values supplied by their RuntimeAlertRuleBinding.
+func TestProcessEvent_UsesBindingParameters(t *testing.T) {
+	engine := newTestCelEngine(t)
+
+	// Rule fires only when params["allowExec"] is false. Tests that:
+	// (1) params is visible from CEL, (2) parameter overrides change behavior.
+	rule := armotypes.RuntimeRule{
+		ID:       "R7000",
+		Name:     "Parameterized exec",
+		Severity: armotypes.RuleSeverityHigh,
+		Expressions: armotypes.RuleExpressions{
+			Message:  `"exec blocked: " + event.Name`,
+			UniqueID: `event.Namespace + "/" + event.Name`,
+			RuleExpression: []armotypes.RuleExpression{
+				{
+					EventType:  armotypes.EventTypeK8sAdmission,
+					Expression: `event.Kind == "PodExecOptions" && !(has(params.allowExec) && params.allowExec)`,
+				},
+			},
+		},
+	}
+
+	attrs := newEvalTestAttributes("PodExecOptions", "test-pod", "default", "CONNECT", "exec",
+		map[string]interface{}{
+			"kind": "PodExecOptions",
+		})
+
+	t.Run("no parameters set — rule fires", func(t *testing.T) {
+		ev := newCelRuleEvaluator(rule, engine)
+		result := ev.ProcessEvent(attrs, nil)
+		if result == nil {
+			t.Fatal("expected non-nil RuleFailure when no parameters override")
+		}
+	})
+
+	t.Run("allowExec=true via binding parameters — rule suppressed", func(t *testing.T) {
+		ev := newCelRuleEvaluator(rule, engine)
+		ev.SetParameters(map[string]interface{}{"allowExec": true})
+		result := ev.ProcessEvent(attrs, nil)
+		if result != nil {
+			t.Errorf("expected nil RuleFailure when params.allowExec=true, got %+v", result)
+		}
+	})
+
+	t.Run("allowExec=false via binding parameters — rule fires", func(t *testing.T) {
+		ev := newCelRuleEvaluator(rule, engine)
+		ev.SetParameters(map[string]interface{}{"allowExec": false})
+		result := ev.ProcessEvent(attrs, nil)
+		if result == nil {
+			t.Fatal("expected non-nil RuleFailure when params.allowExec=false")
+		}
+	})
+}
+
 func TestEnrichmentApplicable(t *testing.T) {
 	tests := []struct {
 		name     string
