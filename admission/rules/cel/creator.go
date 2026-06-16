@@ -53,8 +53,12 @@ func (c *CelRuleCreator) SyncRules(rules []armotypes.RuntimeRule) {
 // collectExpressions returns every CEL expression string that the engine may
 // compile and cache for the given rules: each RuleExpression, plus the
 // per-rule Message and UniqueID templates.
+//
+// No initial capacity is reserved: the per-rule expression count is small and
+// unbounded multiplication (e.g. len(rs)*3) trips CodeQL's overflow check.
+// Go's slice growth handles append amortized fine for this size.
 func collectExpressions(rs []armotypes.RuntimeRule) []string {
-	out := make([]string, 0, len(rs)*3)
+	var out []string
 	for _, r := range rs {
 		if r.Expressions.Message != "" {
 			out = append(out, r.Expressions.Message)
