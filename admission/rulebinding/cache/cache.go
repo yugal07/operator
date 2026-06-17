@@ -13,7 +13,6 @@ import (
 	"github.com/kubescape/node-agent/pkg/watcher"
 	"github.com/kubescape/operator/admission/rulebinding"
 	"github.com/kubescape/operator/admission/rules"
-	rulesv1 "github.com/kubescape/operator/admission/rules/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -38,13 +37,20 @@ type RBCache struct {
 	ignoreRuleBindings bool
 }
 
-func NewCache(k8sClient k8sclient.K8sClientInterface, ignoreRuleBindings bool) *RBCache {
+func NewCache(k8sClient k8sclient.K8sClientInterface, ruleCreator rules.RuleCreator, ignoreRuleBindings bool) *RBCache {
 	return &RBCache{
 		k8sClient:          k8sClient,
-		ruleCreator:        rulesv1.NewRuleCreator(),
+		ruleCreator:        ruleCreator,
 		rbNameToRB:         maps.SafeMap[string, typesv1.RuntimeAlertRuleBinding]{},
 		watchResources:     resourcesToWatch(),
 		ignoreRuleBindings: ignoreRuleBindings,
+	}
+}
+
+func (c *RBCache) RefreshRules() {
+	for _, rb := range c.rbNameToRB.Values() {
+		rbName := uniqueName(&rb)
+		c.rbNameToRules.Set(rbName, c.createRules(rb.Spec.Rules))
 	}
 }
 
@@ -131,16 +137,16 @@ func (c *RBCache) AddNotifier(n *chan rulebindingmanager.RuleBindingNotify) {
 // ------------------ watcher.Watcher methods -----------------------
 
 func (c *RBCache) AddHandler(_ context.Context, obj runtime.Object) {
-	var rbs []rulebindingmanager.RuleBindingNotify
-	if un, ok := obj.(*unstructured.Unstructured); ok {
-		ruleBinding, err := unstructuredToRuleBinding(un)
-		if err != nil {
-			logger.L().Error("failed to convert unstructured to rule binding", helpers.Error(err))
-			return
-		}
-		rbs = c.addRuleBinding(ruleBinding)
+	un, ok := obj.(*unstructured.Unstructured)
+	if !ok || !isRuleBinding(un) {
+		return
 	}
-	// notify
+	ruleBinding, err := unstructuredToRuleBinding(un)
+	if err != nil {
+		logger.L().Error("failed to convert unstructured to rule binding", helpers.Error(err))
+		return
+	}
+	rbs := c.addRuleBinding(ruleBinding)
 	for n := range c.notifiers {
 		for i := range rbs {
 			*c.notifiers[n] <- rbs[i]
@@ -149,16 +155,16 @@ func (c *RBCache) AddHandler(_ context.Context, obj runtime.Object) {
 }
 
 func (c *RBCache) ModifyHandler(_ context.Context, obj runtime.Object) {
-	var rbs []rulebindingmanager.RuleBindingNotify
-	if un, ok := obj.(*unstructured.Unstructured); ok {
-		ruleBinding, err := unstructuredToRuleBinding(un)
-		if err != nil {
-			logger.L().Error("failed to convert unstructured to rule binding", helpers.Error(err))
-			return
-		}
-		rbs = c.modifiedRuleBinding(ruleBinding)
+	un, ok := obj.(*unstructured.Unstructured)
+	if !ok || !isRuleBinding(un) {
+		return
 	}
-	// notify
+	ruleBinding, err := unstructuredToRuleBinding(un)
+	if err != nil {
+		logger.L().Error("failed to convert unstructured to rule binding", helpers.Error(err))
+		return
+	}
+	rbs := c.modifiedRuleBinding(ruleBinding)
 	for n := range c.notifiers {
 		for i := range rbs {
 			*c.notifiers[n] <- rbs[i]
@@ -167,11 +173,11 @@ func (c *RBCache) ModifyHandler(_ context.Context, obj runtime.Object) {
 }
 
 func (c *RBCache) DeleteHandler(_ context.Context, obj runtime.Object) {
-	var rbs []rulebindingmanager.RuleBindingNotify
-	if un, ok := obj.(*unstructured.Unstructured); ok {
-		rbs = c.deleteRuleBinding(uniqueName(un))
+	un, ok := obj.(*unstructured.Unstructured)
+	if !ok || !isRuleBinding(un) {
+		return
 	}
-	// notify
+	rbs := c.deleteRuleBinding(uniqueName(un))
 	for n := range c.notifiers {
 		for i := range rbs {
 			*c.notifiers[n] <- rbs[i]
