@@ -67,8 +67,10 @@ type Remediator interface {
 	// Apply executes a plan. When dryRun is true the write is sent with
 	// server-side dry-run (validated against admission, never persisted).
 	Apply(ctx context.Context, p Plan, dryRun bool) (Result, error)
-	// Revert undoes a previously applied action on the target.
-	Revert(ctx context.Context, t Target) (Result, error)
+	// Revert undoes a previously applied action on the target. Like Apply, a
+	// dryRun=true revert is a server-side dry-run (validated, never persisted),
+	// so the safe-by-default contract holds for revert too.
+	Revert(ctx context.Context, t Target, dryRun bool) (Result, error)
 }
 
 // NewRegistry builds the set of remediators backed by the given client. Phase 1

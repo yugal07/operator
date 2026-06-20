@@ -59,6 +59,13 @@ func (actionHandler *ActionHandler) handleOperatorAction(ctx context.Context) er
 		Name:      args.Target.Name,
 	}
 
+	// All Phase-1 target kinds are namespaced. Require the namespace up front so
+	// the excluded-namespace rail below is actually enforced, instead of an empty
+	// namespace slipping past it and failing late at the API server.
+	if remediators.IsNamespacedKind(target.Kind) && target.Namespace == "" {
+		return fmt.Errorf("operatorAction: target kind %q requires a namespace", target.Kind)
+	}
+
 	// Safety rail: never act on excluded / protected namespaces.
 	if target.Namespace != "" && actionHandler.config.SkipNamespace(target.Namespace) {
 		return fmt.Errorf("operatorAction: namespace %q is excluded from remediation", target.Namespace)
@@ -87,8 +94,9 @@ func (actionHandler *ActionHandler) handleOperatorAction(ctx context.Context) er
 
 	case apis.OperatorActionRevert:
 		// Phase 1: the only applied action is annotate, so revert undoes it.
+		// Pass dryRun so a default (no --confirm) revert previews instead of writing.
 		r := registry[apis.OperatorActionAnnotate]
-		result, err := r.Revert(ctx, target)
+		result, err := r.Revert(ctx, target, dryRun)
 		if err != nil {
 			return err
 		}

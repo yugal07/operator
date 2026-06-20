@@ -69,9 +69,11 @@ func (r *AnnotateRemediator) Apply(ctx context.Context, p Plan, dryRun bool) (Re
 	}, nil
 }
 
-// Revert removes the Kubescape remediation annotations from the target. Revert
-// is always a real write (there is nothing to preview).
-func (r *AnnotateRemediator) Revert(ctx context.Context, t Target) (Result, error) {
+// Revert removes the Kubescape remediation annotations from the target. Like
+// Apply, dryRun=true issues a server-side dry-run (validated against admission,
+// never persisted); only dryRun=false performs a real write — so the
+// safe-by-default contract is honored for revert too.
+func (r *AnnotateRemediator) Revert(ctx context.Context, t Target, dryRun bool) (Result, error) {
 	if err := validateTarget(t); err != nil {
 		return Result{}, err
 	}
@@ -84,14 +86,14 @@ func (r *AnnotateRemediator) Revert(ctx context.Context, t Target) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
-	if err := r.patch(ctx, t, patch, false); err != nil {
+	if err := r.patch(ctx, t, patch, dryRun); err != nil {
 		return Result{}, err
 	}
 	return Result{
 		Action:      string(apis.OperatorActionRevert),
 		Target:      t,
-		DryRun:      false,
-		Applied:     true,
+		DryRun:      dryRun,
+		Applied:     !dryRun,
 		Description: fmt.Sprintf("removed kubescape remediation annotations from %s", t),
 	}, nil
 }
@@ -129,6 +131,19 @@ func (r *AnnotateRemediator) patch(ctx context.Context, t Target, patch []byte, 
 		return err
 	default:
 		return fmt.Errorf("annotate: unsupported target kind %q (supported: Deployment, StatefulSet, DaemonSet, Pod)", t.Kind)
+	}
+}
+
+// IsNamespacedKind reports whether kind is one of the namespaced workload kinds
+// Phase-1 actions operate on. The action handler uses it to enforce the
+// namespace safety rail up front: a namespaced target with no namespace would
+// otherwise skip the excluded-namespace check and fail late at the API server.
+func IsNamespacedKind(kind string) bool {
+	switch strings.ToLower(kind) {
+	case "deployment", "statefulset", "daemonset", "pod":
+		return true
+	default:
+		return false
 	}
 }
 

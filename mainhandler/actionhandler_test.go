@@ -95,6 +95,7 @@ func TestHandleOperatorAction_RevertRemovesAnnotations(t *testing.T) {
 	ah := newActionHandlerForTest(t, client, newTestConfig(config.Config{Namespace: "kubescape"}), apis.OperatorActionArgs{
 		Action: apis.OperatorActionRevert,
 		Target: &apis.OperatorActionTarget{Kind: "Deployment", Namespace: "payments", Name: "api"},
+		DryRun: boolPtr(false), // --confirm: revert is a real write
 	})
 
 	require.NoError(t, ah.handleOperatorAction(context.Background()))
@@ -103,6 +104,40 @@ func TestHandleOperatorAction_RevertRemovesAnnotations(t *testing.T) {
 	require.NoError(t, err)
 	_, ok := got.Annotations[remediators.AnnotationRemediated]
 	assert.False(t, ok)
+}
+
+// Revert must honor the safe-by-default contract: with dryRun unset it previews
+// (server-side dry-run) and must not actually remove the annotations.
+func TestHandleOperatorAction_RevertDefaultsToDryRun(t *testing.T) {
+	client := k8sfake.NewClientset(&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Namespace:   "payments",
+		Name:        "api",
+		Annotations: map[string]string{remediators.AnnotationRemediated: "true", remediators.AnnotationReason: "C-0016"},
+	}})
+	var dryRun []string
+	capturePatchDryRun(client, "deployments", &dryRun)
+
+	ah := newActionHandlerForTest(t, client, newTestConfig(config.Config{Namespace: "kubescape"}), apis.OperatorActionArgs{
+		Action: apis.OperatorActionRevert,
+		Target: &apis.OperatorActionTarget{Kind: "Deployment", Namespace: "payments", Name: "api"},
+		// DryRun intentionally nil
+	})
+
+	require.NoError(t, ah.handleOperatorAction(context.Background()))
+	assert.Equal(t, []string{metav1.DryRunAll}, dryRun, "a revert without dryRun must default to server-side dry-run")
+}
+
+// A namespaced target with no namespace must be rejected up front rather than
+// slipping past the excluded-namespace rail and failing late at the API server.
+func TestHandleOperatorAction_NamespacedKindRequiresNamespace(t *testing.T) {
+	client := k8sfake.NewClientset()
+	ah := newActionHandlerForTest(t, client, newTestConfig(config.Config{Namespace: "kubescape"}), apis.OperatorActionArgs{
+		Action: apis.OperatorActionAnnotate,
+		Target: &apis.OperatorActionTarget{Kind: "Deployment", Name: "api"},
+	})
+	err := ah.handleOperatorAction(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires a namespace")
 }
 
 func TestHandleOperatorAction_ExcludedNamespaceRejected(t *testing.T) {

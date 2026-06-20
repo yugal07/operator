@@ -130,9 +130,10 @@ func TestAnnotateRevert(t *testing.T) {
 	}))
 	r := NewAnnotateRemediator(client)
 
-	res, err := r.Revert(context.Background(), Target{Kind: "Deployment", Namespace: "payments", Name: "api"})
+	res, err := r.Revert(context.Background(), Target{Kind: "Deployment", Namespace: "payments", Name: "api"}, false)
 	require.NoError(t, err)
 	assert.True(t, res.Applied)
+	assert.False(t, res.DryRun)
 	assert.Equal(t, string(apis.OperatorActionRevert), res.Action)
 
 	got, err := client.AppsV1().Deployments("payments").Get(context.Background(), "api", metav1.GetOptions{})
@@ -142,4 +143,22 @@ func TestAnnotateRevert(t *testing.T) {
 	_, ok = got.Annotations[AnnotationReason]
 	assert.False(t, ok, "reason annotation must be removed")
 	assert.Equal(t, "keep-me", got.Annotations["unrelated"], "unrelated annotations must be preserved")
+}
+
+// A dry-run revert must request server-side dry-run and never persist, mirroring
+// Apply — so the safe-by-default contract holds for revert too.
+func TestAnnotateRevertDryRun(t *testing.T) {
+	client := k8sfake.NewClientset(annotatedDeployment("payments", "api", map[string]string{
+		AnnotationRemediated: "true",
+		AnnotationReason:     "C-0016",
+	}))
+	var dryRun []string
+	capturePatchDryRun(client, "deployments", &dryRun)
+	r := NewAnnotateRemediator(client)
+
+	res, err := r.Revert(context.Background(), Target{Kind: "Deployment", Namespace: "payments", Name: "api"}, true)
+	require.NoError(t, err)
+	assert.True(t, res.DryRun)
+	assert.False(t, res.Applied)
+	assert.Equal(t, []string{metav1.DryRunAll}, dryRun, "a dry-run revert must request server-side dry-run")
 }
