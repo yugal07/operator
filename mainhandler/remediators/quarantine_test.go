@@ -55,7 +55,7 @@ func TestQuarantinePlan(t *testing.T) {
 	assert.Equal(t, "Deployment/payments/api", plan.Target.String())
 
 	np := decodeNP(t, plan.Patch)
-	assert.Equal(t, "kubescape-quarantine-api", np.Name)
+	assert.Equal(t, "kubescape-quarantine-deployment-api", np.Name)
 	assert.Equal(t, "payments", np.Namespace)
 	assert.Equal(t, "true", np.Labels[LabelQuarantine])
 	assert.Equal(t, "Deployment/payments/api", np.Annotations[AnnotationQuarantineTarget])
@@ -64,6 +64,30 @@ func TestQuarantinePlan(t *testing.T) {
 	assert.ElementsMatch(t, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}, np.Spec.PolicyTypes)
 	assert.Empty(t, np.Spec.Ingress, "deny-all means no ingress rules")
 	assert.Empty(t, np.Spec.Egress, "deny-all means no egress rules")
+}
+
+// A workload using set-based selectors (matchExpressions) must have that full
+// selector carried into the NetworkPolicy, not silently dropped.
+func TestQuarantinePlanPreservesMatchExpressions(t *testing.T) {
+	expr := []metav1.LabelSelectorRequirement{{
+		Key:      "tier",
+		Operator: metav1.LabelSelectorOpIn,
+		Values:   []string{"backend", "api"},
+	}}
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "payments", Name: "api"},
+		Spec: appsv1.DeploymentSpec{Selector: &metav1.LabelSelector{
+			MatchLabels:      map[string]string{"app": "api"},
+			MatchExpressions: expr,
+		}},
+	}
+	r := NewQuarantineRemediator(k8sfake.NewClientset(deploy))
+	plan, err := r.Plan(context.Background(), Request{Target: Target{Kind: "Deployment", Namespace: "payments", Name: "api"}})
+	require.NoError(t, err)
+
+	np := decodeNP(t, plan.Patch)
+	assert.Equal(t, map[string]string{"app": "api"}, np.Spec.PodSelector.MatchLabels)
+	assert.Equal(t, expr, np.Spec.PodSelector.MatchExpressions, "set-based selector requirements must be preserved")
 }
 
 func TestQuarantinePlanRequiresSelectorLabels(t *testing.T) {
@@ -96,7 +120,7 @@ func TestQuarantineApplyConfirm(t *testing.T) {
 	assert.True(t, res.Applied)
 	assert.Empty(t, dryRun, "a confirmed apply must not request server-side dry-run")
 
-	got, err := client.NetworkingV1().NetworkPolicies("payments").Get(context.Background(), "kubescape-quarantine-api", metav1.GetOptions{})
+	got, err := client.NetworkingV1().NetworkPolicies("payments").Get(context.Background(), "kubescape-quarantine-deployment-api", metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"app": "api"}, got.Spec.PodSelector.MatchLabels)
 	assert.ElementsMatch(t, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}, got.Spec.PolicyTypes)
@@ -128,7 +152,7 @@ func TestQuarantineApplyPodUsesPodLabels(t *testing.T) {
 	_, err = r.Apply(context.Background(), plan, false)
 	require.NoError(t, err)
 
-	got, err := client.NetworkingV1().NetworkPolicies("payments").Get(context.Background(), "kubescape-quarantine-api-0", metav1.GetOptions{})
+	got, err := client.NetworkingV1().NetworkPolicies("payments").Get(context.Background(), "kubescape-quarantine-pod-api-0", metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"app": "api", "pod-template-hash": "abc"}, got.Spec.PodSelector.MatchLabels)
 }
@@ -149,7 +173,7 @@ func TestQuarantineApplyAlreadyExists(t *testing.T) {
 
 func TestQuarantineRevert(t *testing.T) {
 	existing := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "payments", Name: "kubescape-quarantine-api", Labels: map[string]string{LabelQuarantine: "true"}},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "payments", Name: "kubescape-quarantine-deployment-api", Labels: map[string]string{LabelQuarantine: "true"}},
 	}
 	client := k8sfake.NewClientset(existing)
 	r := NewQuarantineRemediator(client)
@@ -159,7 +183,7 @@ func TestQuarantineRevert(t *testing.T) {
 	assert.True(t, res.Applied)
 	assert.Equal(t, string(apis.OperatorActionRevert), res.Action)
 
-	_, err = client.NetworkingV1().NetworkPolicies("payments").Get(context.Background(), "kubescape-quarantine-api", metav1.GetOptions{})
+	_, err = client.NetworkingV1().NetworkPolicies("payments").Get(context.Background(), "kubescape-quarantine-deployment-api", metav1.GetOptions{})
 	assert.Error(t, err, "the quarantine NetworkPolicy must be deleted")
 }
 
@@ -174,7 +198,7 @@ func TestQuarantineRevertNotFound(t *testing.T) {
 
 func TestQuarantineRevertDryRun(t *testing.T) {
 	existing := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "payments", Name: "kubescape-quarantine-api"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "payments", Name: "kubescape-quarantine-deployment-api"},
 	}
 	client := k8sfake.NewClientset(existing)
 	var dryRun []string
@@ -190,9 +214,18 @@ func TestQuarantineRevertDryRun(t *testing.T) {
 
 func TestQuarantineNPNameTruncation(t *testing.T) {
 	long := strings.Repeat("a", 300)
-	name := quarantineNPName(long)
+	name := quarantineNPName(Target{Kind: "Deployment", Namespace: "payments", Name: long})
 	assert.LessOrEqual(t, len(name), maxNameLen)
 	assert.True(t, strings.HasPrefix(name, quarantineNPPrefix))
+}
+
+// Different kinds sharing a name must not collide on the same NetworkPolicy,
+// otherwise reverting one target would delete another's policy.
+func TestQuarantineNPNameUniquePerKind(t *testing.T) {
+	deploy := quarantineNPName(Target{Kind: "Deployment", Namespace: "payments", Name: "api"})
+	sts := quarantineNPName(Target{Kind: "StatefulSet", Namespace: "payments", Name: "api"})
+	assert.NotEqual(t, deploy, sts)
+	assert.Equal(t, "kubescape-quarantine-deployment-api", deploy)
 }
 
 func decodeNP(t *testing.T, body string) *networkingv1.NetworkPolicy {

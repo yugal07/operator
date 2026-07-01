@@ -2,6 +2,8 @@ package remediators
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -60,7 +62,7 @@ func (r *QuarantineRemediator) Plan(ctx context.Context, req Request) (Plan, err
 	return Plan{
 		Action:      string(apis.OperatorActionQuarantine),
 		Target:      req.Target,
-		Description: fmt.Sprintf("deny-all NetworkPolicy %q isolating %s (podSelector %v)", np.Name, req.Target, selector),
+		Description: fmt.Sprintf("deny-all NetworkPolicy %q isolating %s (podSelector %s)", np.Name, req.Target, metav1.FormatLabelSelector(selector)),
 		Patch:       string(body),
 	}, nil
 }
@@ -102,7 +104,7 @@ func (r *QuarantineRemediator) Revert(ctx context.Context, t Target, dryRun bool
 	if err := validateTarget(t); err != nil {
 		return Result{}, err
 	}
-	name := quarantineNPName(t.Name)
+	name := quarantineNPName(t)
 	opts := metav1.DeleteOptions{}
 	if dryRun {
 		opts.DryRun = []string{metav1.DryRunAll}
@@ -126,49 +128,51 @@ func (r *QuarantineRemediator) Revert(ctx context.Context, t Target, dryRun bool
 	}, nil
 }
 
-// resolvePodSelector returns the labels that select the target's running pods,
-// read from the live object so quarantine isolates the existing pods without
-// recreating them.
-func (r *QuarantineRemediator) resolvePodSelector(ctx context.Context, t Target) (map[string]string, error) {
-	var labels map[string]string
+// resolvePodSelector returns the label selector that selects the target's
+// running pods, read from the live object so quarantine isolates the existing
+// pods without recreating them. The full selector (both matchLabels and
+// matchExpressions) is preserved so workloads using set-based selectors are
+// isolated correctly.
+func (r *QuarantineRemediator) resolvePodSelector(ctx context.Context, t Target) (*metav1.LabelSelector, error) {
+	var selector *metav1.LabelSelector
 	switch strings.ToLower(t.Kind) {
 	case "deployment":
 		o, err := r.client.AppsV1().Deployments(t.Namespace).Get(ctx, t.Name, metav1.GetOptions{})
 		if err != nil {
 			return nil, err
 		}
-		labels = matchLabels(o.Spec.Selector)
+		selector = o.Spec.Selector
 	case "statefulset":
 		o, err := r.client.AppsV1().StatefulSets(t.Namespace).Get(ctx, t.Name, metav1.GetOptions{})
 		if err != nil {
 			return nil, err
 		}
-		labels = matchLabels(o.Spec.Selector)
+		selector = o.Spec.Selector
 	case "daemonset":
 		o, err := r.client.AppsV1().DaemonSets(t.Namespace).Get(ctx, t.Name, metav1.GetOptions{})
 		if err != nil {
 			return nil, err
 		}
-		labels = matchLabels(o.Spec.Selector)
+		selector = o.Spec.Selector
 	case "pod":
 		o, err := r.client.CoreV1().Pods(t.Namespace).Get(ctx, t.Name, metav1.GetOptions{})
 		if err != nil {
 			return nil, err
 		}
-		labels = o.Labels
+		selector = &metav1.LabelSelector{MatchLabels: o.Labels}
 	default:
 		return nil, fmt.Errorf("quarantine: unsupported target kind %q (supported: Deployment, StatefulSet, DaemonSet, Pod)", t.Kind)
 	}
-	if len(labels) == 0 {
+	if selector == nil || (len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0) {
 		return nil, fmt.Errorf("quarantine: %s has no pod selector labels to isolate; cannot build a NetworkPolicy", t)
 	}
-	return labels, nil
+	return selector, nil
 }
 
 // buildNetworkPolicy assembles the deny-all NetworkPolicy: it selects the
 // target's pods and declares both policy types with no allow rules, which denies
 // all ingress and egress. Audit context is recorded in its labels/annotations.
-func (r *QuarantineRemediator) buildNetworkPolicy(req Request, selector map[string]string) *networkingv1.NetworkPolicy {
+func (r *QuarantineRemediator) buildNetworkPolicy(req Request, selector *metav1.LabelSelector) *networkingv1.NetworkPolicy {
 	annotations := map[string]string{AnnotationQuarantineTarget: req.Target.String()}
 	if req.Reason != "" {
 		annotations[AnnotationReason] = req.Reason
@@ -178,13 +182,13 @@ func (r *QuarantineRemediator) buildNetworkPolicy(req Request, selector map[stri
 	}
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        quarantineNPName(req.Target.Name),
+			Name:        quarantineNPName(req.Target),
 			Namespace:   req.Target.Namespace,
 			Labels:      map[string]string{LabelQuarantine: "true"},
 			Annotations: annotations,
 		},
 		Spec: networkingv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{MatchLabels: selector},
+			PodSelector: *selector,
 			// Both policy types selected with no ingress/egress rules => deny all.
 			PolicyTypes: []networkingv1.PolicyType{
 				networkingv1.PolicyTypeIngress,
@@ -194,20 +198,18 @@ func (r *QuarantineRemediator) buildNetworkPolicy(req Request, selector map[stri
 	}
 }
 
-func matchLabels(sel *metav1.LabelSelector) map[string]string {
-	if sel == nil {
-		return nil
-	}
-	return sel.MatchLabels
-}
-
 // quarantineNPName derives the deterministic deny-all NetworkPolicy name for a
-// target so revert can find it from the target name alone, kept within the
-// object-name length limit and with no invalid trailing separators.
-func quarantineNPName(target string) string {
-	name := quarantineNPPrefix + target
-	if len(name) > maxNameLen {
-		name = strings.TrimRight(name[:maxNameLen], "-.")
+// target so revert can find it from the target identity alone. The name is keyed
+// on both kind and name so different kinds sharing a name (e.g. Deployment/api
+// and StatefulSet/api) do not collide on — or delete — each other's policy. It
+// is kept within the object-name length limit; when truncation is needed a short
+// hash of the full identity is appended to keep distinct targets distinct.
+func quarantineNPName(t Target) string {
+	base := quarantineNPPrefix + strings.ToLower(t.Kind) + "-" + t.Name
+	if len(base) <= maxNameLen {
+		return base
 	}
-	return name
+	sum := sha256.Sum256([]byte(t.String()))
+	suffix := "-" + hex.EncodeToString(sum[:])[:10]
+	return strings.TrimRight(base[:maxNameLen-len(suffix)], "-.") + suffix
 }

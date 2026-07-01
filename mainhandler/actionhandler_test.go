@@ -231,7 +231,7 @@ func TestHandleOperatorAction_QuarantineConfirmWrites(t *testing.T) {
 	})
 
 	require.NoError(t, ah.handleOperatorAction(context.Background()))
-	got, err := client.NetworkingV1().NetworkPolicies("payments").Get(context.Background(), "kubescape-quarantine-api", metav1.GetOptions{})
+	got, err := client.NetworkingV1().NetworkPolicies("payments").Get(context.Background(), "kubescape-quarantine-deployment-api", metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"app": "api"}, got.Spec.PodSelector.MatchLabels)
 }
@@ -248,12 +248,18 @@ func TestHandleOperatorAction_QuarantineExcludedNamespace(t *testing.T) {
 	err := ah.handleOperatorAction(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "excluded from remediation")
+
+	// The rejection must happen before any cluster write — no NetworkPolicy may
+	// have been created in the excluded namespace.
+	nps, listErr := client.NetworkingV1().NetworkPolicies("kube-system").List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, listErr)
+	assert.Empty(t, nps.Items, "excluded namespace must be rejected before any NetworkPolicy write")
 }
 
 // revert undoes quarantine (deletes the NetworkPolicy) even when the workload was
 // never annotated — without the caller naming which action to undo.
 func TestHandleOperatorAction_RevertDeletesQuarantine(t *testing.T) {
-	np := networkPolicyForHandler("payments", "kubescape-quarantine-api")
+	np := networkPolicyForHandler("payments", "kubescape-quarantine-deployment-api")
 	client := k8sfake.NewClientset(np)
 	ah := newActionHandlerForTest(t, client, newTestConfig(config.Config{Namespace: "kubescape"}), apis.OperatorActionArgs{
 		Action: apis.OperatorActionRevert,
@@ -262,7 +268,7 @@ func TestHandleOperatorAction_RevertDeletesQuarantine(t *testing.T) {
 	})
 
 	require.NoError(t, ah.handleOperatorAction(context.Background()))
-	_, err := client.NetworkingV1().NetworkPolicies("payments").Get(context.Background(), "kubescape-quarantine-api", metav1.GetOptions{})
+	_, err := client.NetworkingV1().NetworkPolicies("payments").Get(context.Background(), "kubescape-quarantine-deployment-api", metav1.GetOptions{})
 	assert.Error(t, err, "revert must delete the quarantine NetworkPolicy")
 }
 
